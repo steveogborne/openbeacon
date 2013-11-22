@@ -59,7 +59,7 @@ indent:
 counted: $(PROGNAME).hex
 
 $(PROGNAME).hex: obj/$(PROGNAME).hex
-	php ./create_counted_firmware.php
+	cp $^ $@
 
 production: clean $(PROG_TARGET).zip
 
