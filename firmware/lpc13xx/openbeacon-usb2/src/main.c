@@ -57,6 +57,7 @@ static uint32_t random_seed;
 /* logfile position */
 static uint32_t g_storage_items;
 static uint32_t g_sequence;
+static volatile uint8_t g_do_tx;
 
 #define TX_STRENGTH_OFFSET 2
 
@@ -83,21 +84,16 @@ static const unsigned char broadcast_mac[NRF_MAX_MAC_SIZE] = {
 };
 
 /* OpenBeacon packet */
-static TBeaconEnvelope g_Beacon;
-
-#define BEACON_CRC_SIZE (sizeof (g_Beacon) - sizeof (g_Beacon.pkt.crc))
+static uint8_t g_Beacon[16];
 
 static void
 nRF_tx (uint8_t power)
 {
-	/* encrypt data */
-	xxtea_encode (g_Beacon.block, XXTEA_BLOCK_COUNT, xxtea_key);
-
 	/* set TX power */
 	nRFAPI_SetTxPower (power & 0x3);
 
 	/* upload data to nRF24L01 */
-	nRFAPI_TX (g_Beacon.byte, sizeof (g_Beacon));
+	nRFAPI_TX (g_Beacon, sizeof (g_Beacon));
 
 	/* transmit data */
 	nRFCMD_CE (1);
@@ -307,66 +303,33 @@ tag_aggregate (uint16_t oid, uint8_t strength, uint8_t flags, uint32_t seq)
 static inline void
 tag_aggregate_tx (void)
 {
-	int i;
-	uint8_t power, count, *s, slot;
-	TProximitySlot *p;
+	/* fire up LED to indicate rx */
+	GPIOSetValue (1, 1, 1);
+	/* light LED for 10ms */
+	pmu_wait_ms (10);
+	/* turn LED off */
+	GPIOSetValue (1, 1, 0);
 
-	p = prox;
-	for (i = 0; i < PROXIMITY_SLOTS; i++)
-	{
-		if (!p->oid)
-			break;
+	/* prepare packet */
+	bzero (&g_Beacon, sizeof (g_Beacon));
 
-		debug_printf ("\"aggregate\":{\"id\":\"%04X\",power:[", p->oid);
+	/* transmit packet */
+	nRF_tx (3);
+}
 
-		/* prepare packet */
-		bzero (&g_Beacon, sizeof (g_Beacon));
-		g_Beacon.pkt.proto = RFBPROTO_FORWARD;
-		g_Beacon.pkt.flags = p->flags;
-		g_Beacon.pkt.oid = htons (tag_id);
-		g_Beacon.pkt.p.forward.oid = htons (p->oid);
-
-		slot = 0;
-		s = p->strength;
-		for (power = 0; power < FWDTAG_STRENGTH_COUNT; power++)
-		{
-			count = *s++;
-			debug_printf ("%c%2u", power ? ',' : ' ', count);
-
-			if (count && (slot < FWDTAG_SLOTS))
-			{
-				if (count > FWDTAG_COUNT_MASK)
-				{
-					count = FWDTAG_COUNT_MASK;
-					g_Beacon.pkt.flags |= RFBFLAGS_OVERFLOW;
-				}
-				g_Beacon.pkt.p.forward.slot[slot++] =
-					FWDTAG_SLOT (power, count);
-			}
-		}
-		debug_printf (" ], \"seq\":%u, \"flags\":%u},\n", p->seq, p->flags);
-
-		g_Beacon.pkt.p.forward.seq = htonl (p->seq);
-		g_Beacon.pkt.crc = htons (crc16 (g_Beacon.byte, BEACON_CRC_SIZE));
-
-		/* transmit packet */
-		nRF_tx (3);
-
-		p++;
-	}
-
-	/* reset proximity buffer */
-	bzero (&prox, sizeof (prox));
+void
+CDC_GetCommand (unsigned char *command)
+{
+	(void)command;
+//	debug_printf ("Unknown command: '%s'\n", command);
+	debug_printf ("RX: '%s'\n", command);
+	g_do_tx = 1;
 }
 
 int
 main (void)
 {
-	int x, y, z;
-	uint32_t seq, oid, packets;
-	uint32_t time, last_time, delta_time;
-	uint16_t crc;
-	uint8_t flags, status, strength;
+	int x;
 #ifdef  ENABLE_BLUETOOTH
 	uint8_t bt_enabled;
 #endif /*ENABLE_BLUETOOTH */
@@ -435,92 +398,22 @@ main (void)
 	/* reset proximity buffer */
 	bzero (&prox, sizeof (prox));
 
-	/* enable RX mode */
-	nRFAPI_SetRxMode (1);
-	nRFCMD_CE (1);
+	/* enable TX mode */
+	nRFAPI_SetRxMode (0);
+	nRFCMD_CE (0);
+	nRFAPI_SetChannel (CONFIG_TRACKER_CHANNEL);
 
 	/* blink two times to show readyness */
 	blink (2);
-	/* remember last time */
-	last_time = LPC_TMR32B0->TC;
-	packets = seq = 0;
 	g_sequence = 0;
+	g_do_tx = 0;
+
 	while (1)
 	{
-		if (nRFCMD_IRQ ())
+		if(g_do_tx)
 		{
-			do
-			{
-				packets++;
-
-				// read packet from nRF chip
-				nRFCMD_RegReadBuf (RD_RX_PLOAD, g_Beacon.byte,
-								   sizeof (g_Beacon));
-
-				// adjust byte order and decode
-				xxtea_decode (g_Beacon.block, XXTEA_BLOCK_COUNT, xxtea_key);
-
-				// verify the CRC checksum
-				crc =
-					crc16 (g_Beacon.byte,
-						   sizeof (g_Beacon) - sizeof (g_Beacon.pkt.crc));
-
-				if (ntohs (g_Beacon.pkt.crc) == crc)
-				{
-					seq = oid = 0;
-					flags = strength = 0;
-
-					/* increment global sequence counter to reseed rnd */
-					g_sequence++;
-
-					switch (g_Beacon.proto)
-					{
-
-						case RFBPROTO_BEACONTRACKER_OLD:
-							if (g_Beacon.old.proto2 ==
-								RFBPROTO_BEACONTRACKER_OLD2)
-							{
-								strength = g_Beacon.old.strength / 0x55;
-								flags = g_Beacon.old.flags;
-								oid = ntohl (g_Beacon.old.oid);
-								seq = ntohl (g_Beacon.old.seq);
-							}
-							break;
-
-						case RFBPROTO_PROXTRACKER:
-						case RFBPROTO_BEACONTRACKER:
-							strength = g_Beacon.pkt.p.tracker.strength;
-							flags = g_Beacon.pkt.flags;
-							oid = ntohs (g_Beacon.pkt.oid);
-							seq = ntohl (g_Beacon.pkt.p.tracker.seq);
-							break;
-
-						case RFBPROTO_BEACONTRACKER_EXT:
-							strength = g_Beacon.pkt.p.trackerExt.strength;
-							flags = g_Beacon.pkt.flags;
-							oid = ntohs (g_Beacon.pkt.oid);
-							seq = ntohl (g_Beacon.pkt.p.trackerExt.seq);
-					}
-
-					if (oid && (oid <= 0xFFFF))
-					{
-						/* remember tag sighting */
-						tag_aggregate (oid, strength, flags, seq);
-
-						/* fire up LED to indicate rx */
-						GPIOSetValue (1, 1, 1);
-						/* light LED for 2ms */
-						pmu_wait_ms (2);
-						/* turn LED off */
-						GPIOSetValue (1, 1, 0);
-					}
-				}
-
-				/* get status */
-				status = nRFAPI_GetFifoStatus ();
-			}
-			while ((status & FIFO_RX_EMPTY) == 0);
-			nRFAPI_ClearIRQ (MASK_IRQ_FLAGS);
+			tag_aggregate_tx ();
+			g_do_tx = 0;
 		}
 
 #ifdef  ENABLE_BLUETOOTH
@@ -531,57 +424,15 @@ main (void)
 				for(x=0;x<(int)UARTCount;x++)
 					if(UARTBuffer[x]=='\n')
 					{
-						bt_enabled=TRUE;
-						EnableBluetoothConsole ( TRUE );
+//						bt_enabled=TRUE;
+//						EnableBluetoothConsole ( TRUE );
 						break;
 					}
+			/* prepare outgoing packet */
+			tag_aggregate_tx ();
 			UARTCount = 0;
 		}
 #endif /*ENABLE_BLUETOOTH */
-
-		time = LPC_TMR32B0->TC;
-		delta_time = time - last_time;
-		/* run transmit code two times per second */
-		if (delta_time >= 10)
-		{
-			/* switch to TX mode */
-			nRFCMD_CE (0);
-			/* wait till possible RX is done */
-			pmu_wait_ms (2);
-			/* switch to TX mode */
-			nRFAPI_SetRxMode (0);
-			/* switch to packet forwarding channel */
-#if CONFIG_TRACKER_CHANNEL!=CONFIG_NAVIGATION_CHANNEL
-			nRFAPI_SetChannel (CONFIG_TRACKER_CHANNEL);
-#endif
-
-			/* print packet statistics */
-			last_time = time;
-			acc_xyz_read (&x, &y, &z);
-			debug_printf
-				("\"stats\":{\"id\":\"%04X\", \"version\":\"%s\", \"time\":%u, "
-				 "\"rate\":%u, acc:{\"x\":%i,\"y\":%i,\"z\":%i}},\n",
-				 tag_id, PROGRAM_VERSION, time,
-				 (packets * 10) / delta_time, x, y, z);
-			packets = 0;
-
-			/* prepare outgoing packet */
-			tag_aggregate_tx ();
-
-			/* turn LED on */
-			GPIOSetValue (1, 2, 1);
-
-			/* switch back to navigation channel */
-#if CONFIG_TRACKER_CHANNEL!=CONFIG_NAVIGATION_CHANNEL
-			nRFAPI_SetChannel (CONFIG_NAVIGATION_CHANNEL);
-#endif
-			/* switch to RX mode */
-			nRFAPI_SetRxMode (1);
-			nRFCMD_CE (1);
-
-			/* turn LED off */
-			GPIOSetValue (1, 2, 0);
-		}
 	}
 	return 0;
 }

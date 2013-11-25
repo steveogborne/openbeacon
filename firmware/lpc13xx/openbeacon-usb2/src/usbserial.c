@@ -82,13 +82,6 @@ CDC_BulkIn (void)
 }
 
 static inline void
-CDC_GetCommand (unsigned char *command)
-{
-	debug_printf ("Unknown command: '%s'\n", command);
-	CDC_Flush ();
-}
-
-static inline void
 CDC_GetChar (unsigned char data)
 {
 	if (fifo_in_count < (int) (sizeof (fifo_in) - 1))

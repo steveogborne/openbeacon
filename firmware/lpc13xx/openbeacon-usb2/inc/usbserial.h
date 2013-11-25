@@ -26,6 +26,8 @@
 
 #ifdef  ENABLE_USB_FULLFEATURED
 extern void init_usbserial (void);
+extern void CDC_GetCommand (unsigned char *command);
+
 
 #ifdef  ENABLE_BLUETOOTH
 extern void EnableBluetoothConsole (BOOL enable);
