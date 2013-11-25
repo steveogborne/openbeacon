@@ -104,6 +104,17 @@ crc16 (const unsigned char *buffer, unsigned char size)
 }
 */
 
+void pwm(uint16_t jiffies)
+{
+	CONFIG_PIN_LED = 1;
+	CONFIG_PIN_TX_POWER = 1;
+	sleep_jiffies (jiffies);
+
+	CONFIG_PIN_LED = 0;
+	CONFIG_PIN_TX_POWER = 0;
+	sleep_jiffies (JIFFIES_PER_MS (20)-jiffies);
+}
+
 void
 main (void)
 {
@@ -158,6 +169,7 @@ main (void)
 
 	while (1)
 	{
+/*
 		nRFCMD_Listen (JIFFIES_PER_MS (500));
 
 		if (!CONFIG_PIN_IRQ)
@@ -182,5 +194,12 @@ main (void)
 
 		// disable LED
 		CONFIG_PIN_LED = 0;
+*/
+
+		for(j=0;j<200;j++)
+			pwm(10);
+
+		for(j=0;j<200;j++)
+			pwm(30);
 	}
 }
